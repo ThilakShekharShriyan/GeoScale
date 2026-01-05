@@ -1,0 +1,5 @@
+# GeoScale Default Configuration
+batch_size: 32
+num_workers: 4
+world_size: 4
+shard_prefix_length: 5

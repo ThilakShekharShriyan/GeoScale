@@ -1,0 +1,6 @@
+torch
+torchvision
+ray
+geohash2
+faiss-cpu
+pyyaml
