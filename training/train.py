@@ -14,10 +14,10 @@ from dataset.loader import get_dataloader, ShardedGeoDataset
 from training.model import VisioPoseModel
 from utils.config import load_config
 
-def setup(rank, world_size):
+def setup(rank, world_size, backend="gloo"):
     os.environ.setdefault('MASTER_ADDR', 'localhost')
     os.environ.setdefault('MASTER_PORT', '12355')
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
 
 def cleanup():
     if dist.is_initialized():
@@ -42,33 +42,57 @@ def main():
     parser.add_argument("--checkpoint-dir", default="checkpoints", type=str)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--use-gpu", action="store_true", help="Enable GPU training if available")
+    parser.add_argument("--checkpoint-vision", action="store_true", help="Enable activation checkpointing for ViT")
     args = parser.parse_args()
+
+    config = load_config()
+
+    use_gpu = args.use_gpu or getattr(config, 'use_gpu', False) == True or getattr(config, 'use_gpu', 'auto') == 'auto'
+    if use_gpu and not torch.cuda.is_available():
+        print("Warning: GPU requested but not available. Falling back to CPU in DDP")
+        use_gpu = False
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     rank = int(os.environ.get("RANK", 0))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
+    backend = "nccl" if (use_gpu and torch.cuda.is_available()) else "gloo"
+
     if world_size > 1 and not dist.is_initialized():
-        setup(rank, world_size)
+        setup(rank, world_size, backend)
 
-    device = torch.device('cpu')
+    device = torch.device(f'cuda:{local_rank}' if use_gpu else 'cpu')
+    if use_gpu:
+        torch.cuda.set_device(device)
+
     if rank == 0:
-        print(f"Process initialized. World size: {world_size}")
+        print(f"Process initialized. World size: {world_size}, Device: {device}, Backend: {backend}")
 
-    model = VisioPoseModel().to(device)
+    model = VisioPoseModel(use_checkpointing=args.checkpoint_vision).to(device)
+
     if world_size > 1:
-        model = DDP(model)
+        if use_gpu:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            from torch.distributed.fsdp import MixedPrecision
+            mp_policy = MixedPrecision(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+                buffer_dtype=torch.bfloat16
+            )
+            model = FSDP(model, device_id=local_rank, mixed_precision=mp_policy)
+        else:
+            model = DDP(model)
 
     dataset = ShardedGeoDataset(args.data_dir)
     sampler = DistributedSampler(dataset) if world_size > 1 else None
 
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
+    dataloader = get_dataloader(
+        args.data_dir,
         batch_size=args.batch_size,
         shuffle=(sampler is None),
-        sampler=sampler,
         num_workers=args.num_workers,
-        prefetch_factor=2 if args.num_workers > 0 else None
+        use_gpu=use_gpu
     )
 
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
@@ -96,8 +120,12 @@ def main():
 
     profiler = None
     if args.profile and rank == 0:
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if use_gpu and torch.cuda.is_available():
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+
         profiler = torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU],
+            activities=activities,
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/profiler'),
             record_shapes=False, profile_memory=False, with_stack=False
@@ -118,8 +146,8 @@ def main():
         for batch_idx, batch in enumerate(dataloader):
             batch_start = time.time()
 
-            images = batch['image'].to(device)
-            poses = batch['pose'].to(device)
+            images = batch['image'].to(device, non_blocking=use_gpu)
+            poses = batch['pose'].to(device, non_blocking=use_gpu)
 
             optimizer.zero_grad()
 

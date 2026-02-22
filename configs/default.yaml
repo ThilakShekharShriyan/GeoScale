@@ -1,4 +1,5 @@
 # GeoScale Default Configuration
+use_gpu: auto
 batch_size: 32
 num_workers: 4
 world_size: 4
