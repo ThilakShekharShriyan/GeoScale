@@ -43,7 +43,7 @@ class ShardedGeoDataset(Dataset):
             "id": meta["id"]
         }
 
-def get_dataloader(root_dir, batch_size=32, num_workers=4, shuffle=True):
+def get_dataloader(root_dir, batch_size=32, num_workers=4, shuffle=True, use_gpu=False):
     dataset = ShardedGeoDataset(root_dir)
 
     dataloader = DataLoader(
@@ -51,7 +51,7 @@ def get_dataloader(root_dir, batch_size=32, num_workers=4, shuffle=True):
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=use_gpu,
         prefetch_factor=2 if num_workers > 0 else None
     )
 
