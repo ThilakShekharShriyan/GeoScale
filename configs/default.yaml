@@ -1,5 +1,7 @@
 # GeoScale Default Configuration
 use_gpu: auto
+data_source: "synthetic"
+waymo_gcs_bucket: "waymo_open_dataset_v_1_4_3"
 batch_size: 32
 num_workers: 4
 world_size: 4
